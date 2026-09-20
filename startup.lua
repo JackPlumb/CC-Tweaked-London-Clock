@@ -1,26 +1,11 @@
--- London clock for multiple CC:Tweaked monitors
+-- Analogue London clock for multiple CC:Tweaked monitors
 
 local monitors = { peripheral.find("monitor") }
 
 if #monitors == 0 then
-    error("No monitors are connected")
+    error("No monitors connected")
 end
 
-local digits = {
-    ["0"] = {"###", "# #", "# #", "# #", "###"},
-    ["1"] = {" # ", "## ", " # ", " # ", "###"},
-    ["2"] = {"###", "  #", "###", "#  ", "###"},
-    ["3"] = {"###", "  #", "###", "  #", "###"},
-    ["4"] = {"# #", "# #", "###", "  #", "  #"},
-    ["5"] = {"###", "#  ", "###", "  #", "###"},
-    ["6"] = {"###", "#  ", "###", "# #", "###"},
-    ["7"] = {"###", "  #", "  #", "  #", "  #"},
-    ["8"] = {"###", "# #", "###", "# #", "###"},
-    ["9"] = {"###", "# #", "###", "  #", "###"},
-    [":"] = {" ", "#", " ", "#", " "}
-}
-
--- Returns 0 for Sunday, 1 for Monday, etc.
 local function dayOfWeek(year, month, day)
     local offsets = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4}
 
@@ -42,8 +27,6 @@ local function lastSunday(year, month)
     return 31 - dayOfWeek(year, month, 31)
 end
 
--- UK summer time starts at 01:00 UTC on the last Sunday
--- in March and ends at 01:00 UTC on the last Sunday in October.
 local function isBritishSummerTime(utc)
     if utc.month > 3 and utc.month < 10 then
         return true
@@ -53,108 +36,171 @@ local function isBritishSummerTime(utc)
         return false
     end
 
-    local transitionDay = lastSunday(utc.year, utc.month)
+    local changeDay = lastSunday(utc.year, utc.month)
 
     if utc.month == 3 then
-        return utc.day > transitionDay
-            or (utc.day == transitionDay and utc.hour >= 1)
+        return utc.day > changeDay
+            or (utc.day == changeDay and utc.hour >= 1)
     end
 
-    return utc.day < transitionDay
-        or (utc.day == transitionDay and utc.hour < 1)
+    return utc.day < changeDay
+        or (utc.day == changeDay and utc.hour < 1)
 end
 
-local function centredWrite(monitor, y, text, colour)
-    local width = monitor.getSize()
-    monitor.setBackgroundColour(colours.black)
-    monitor.setTextColour(colour)
-    monitor.setCursorPos(
-        math.max(1, math.floor((width - #text) / 2) + 1),
-        y
-    )
-    monitor.write(text)
+local function londonTime()
+    local utcSeconds = math.floor(os.epoch("utc") / 1000)
+    local utc = os.date("!*t", utcSeconds)
+    local offset = isBritishSummerTime(utc) and 3600 or 0
+
+    return os.date("!*t", utcSeconds + offset)
 end
 
-local function drawClock(monitor, london, zone)
-    monitor.setTextScale(1)
+local function round(number)
+    return math.floor(number + 0.5)
+end
+
+local displays = {}
+
+for _, monitor in ipairs(monitors) do
+    monitor.setTextScale(0.5)
 
     local width, height = monitor.getSize()
-
-    -- Fall back to smaller text if the monitor is unusually small.
-    if width < 17 or height < 8 then
-        monitor.setTextScale(0.5)
-        width, height = monitor.getSize()
-    end
-
-    monitor.setBackgroundColour(colours.black)
-    monitor.clear()
-    monitor.setCursorBlink(false)
-
-    local timeText = string.format(
-        "%02d:%02d",
-        london.hour,
-        london.min
-    )
-
-    local clockWidth = 0
-    for i = 1, #timeText do
-        clockWidth = clockWidth + #digits[timeText:sub(i, i)][1]
-
-        if i < #timeText then
-            clockWidth = clockWidth + 1
-        end
-    end
-
-    local top = math.max(1, math.floor((height - 8) / 2) + 1)
-    local startX = math.max(1, math.floor((width - clockWidth) / 2) + 1)
-
-    centredWrite(monitor, top, "LONDON", colours.white)
-
-    for row = 1, 5 do
-        local x = startX
-
-        for i = 1, #timeText do
-            local character = timeText:sub(i, i)
-            local pattern = digits[character][row]
-
-            for pixel = 1, #pattern do
-                if pattern:sub(pixel, pixel) == "#" then
-                    monitor.setBackgroundColour(colours.lightBlue)
-                    monitor.setCursorPos(x + pixel - 1, top + row + 1)
-                    monitor.write(" ")
-                end
-            end
-
-            x = x + #pattern + 1
-        end
-    end
-
-    centredWrite(
+    local buffer = window.create(
         monitor,
-        top + 7,
-        string.format("%s  %02d SEC", zone, london.sec),
-        colours.lightGrey
+        1,
+        1,
+        width,
+        height,
+        false
     )
+
+    table.insert(displays, {
+        monitor = monitor,
+        buffer = buffer,
+        width = width,
+        height = height
+    })
+end
+
+local function drawClock(display, time)
+    local screen = display.buffer
+    local width = display.width
+    local height = display.height
+
+    screen.setVisible(false)
+
+    local previousTerminal = term.redirect(screen)
+
+    screen.setBackgroundColour(colors.black)
+    screen.clear()
+    screen.setCursorBlink(false)
+
+    local centreX = math.floor((width + 1) / 2)
+    local centreY = math.floor((height + 1) / 2)
+
+    -- Compensate for monitor characters being taller than wide.
+    local radiusY = math.max(4, math.floor((height - 2) / 2))
+    local radiusX = math.min(
+        math.floor((width - 2) / 2),
+        math.floor(radiusY * 1.5)
+    )
+
+    -- Fill the clock face.
+    for offsetY = -radiusY, radiusY do
+        local position = offsetY / radiusY
+        local span = math.floor(
+            radiusX * math.sqrt(math.max(0, 1 - position * position))
+        )
+
+        paintutils.drawLine(
+            centreX - span,
+            centreY + offsetY,
+            centreX + span,
+            centreY + offsetY,
+            colors.gray
+        )
+    end
+
+    -- Draw the outer rim.
+    for degrees = 0, 359 do
+        local angle = math.rad(degrees)
+
+        paintutils.drawPixel(
+            round(centreX + math.sin(angle) * radiusX),
+            round(centreY - math.cos(angle) * radiusY),
+            colors.lightGray
+        )
+    end
+
+    -- Draw the twelve hour markers.
+    for hour = 0, 11 do
+        local angle = (hour / 12) * math.pi * 2
+        local markerColour
+
+        if hour % 3 == 0 then
+            markerColour = colors.yellow
+        else
+            markerColour = colors.white
+        end
+
+        paintutils.drawPixel(
+            round(centreX + math.sin(angle) * radiusX * 0.82),
+            round(centreY - math.cos(angle) * radiusY * 0.82),
+            markerColour
+        )
+    end
+
+    local seconds = time.sec
+    local minutes = time.min + seconds / 60
+    local hours = (time.hour % 12) + minutes / 60
+
+    local function drawHand(position, divisions, length, colour)
+        local angle = (position / divisions) * math.pi * 2
+
+        local endX = round(
+            centreX + math.sin(angle) * radiusX * length
+        )
+
+        local endY = round(
+            centreY - math.cos(angle) * radiusY * length
+        )
+
+        paintutils.drawLine(
+            centreX,
+            centreY,
+            endX,
+            endY,
+            colour
+        )
+    end
+
+    -- Draw shorter hands first so the second hand remains visible.
+    drawHand(hours, 12, 0.48, colors.yellow)
+    drawHand(minutes, 60, 0.68, colors.white)
+    drawHand(seconds, 60, 0.76, colors.red)
+
+    paintutils.drawPixel(
+        centreX,
+        centreY,
+        colors.white
+    )
+
+    term.redirect(previousTerminal)
+    screen.setVisible(true)
 end
 
 local previousSecond = -1
 
 while true do
-    local utcSeconds = math.floor(os.epoch("utc") / 1000)
-    local utc = os.date("!*t", utcSeconds)
-    local summerTime = isBritishSummerTime(utc)
+    local time = londonTime()
 
-    local londonSeconds = utcSeconds + (summerTime and 3600 or 0)
-    local london = os.date("!*t", londonSeconds)
-    local zone = summerTime and "BST" or "GMT"
-
-    if london.sec ~= previousSecond then
-        for _, monitor in ipairs(monitors) do
-            drawClock(monitor, london, zone)
+    if time.sec ~= previousSecond then
+        for _, display in ipairs(displays) do
+            drawClock(display, time)
         end
 
-        previousSecond = london.sec
+        previousSecond = time.sec
     end
 
-    sleep(0.1)
+    sleep(0.05)
 end
